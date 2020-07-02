@@ -1,37 +1,49 @@
 /*
- * romfs.c
- * romfs devoptab implementation
+ * devoptab.c
+ * ramfs devoptab implementation
  * Copyright (C) 2019 rw-r-r-0644
  */
 
-#ifndef _ROMFS_DEVOPTAB_C
-#define _ROMFS_DEVOPTAB_C
+#include "ramfs_internal.h"
+
+#if defined(__WIIU__) || defined(__SWITCH__)
+
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/dirent.h>
+#include <sys/iosupport.h>
+#include <sys/param.h>
+#include <stdint.h>
+#include <unistd.h>
 
 /* file informations structure */
 typedef struct
 {
-	node_t *fsnode;
+	ramfs_node *fsnode;
 	off_t pos;
-} romfs_file_t;
+} ramfs_file_t;
 
 /* directory informations structure */
 typedef struct
 {
-	node_t *fsdir;
-	node_t *ent;
+	ramfs_node *fsdir;
+	ramfs_node *ent;
 	int32_t idx;
-} romfs_dir_t;
+} ramfs_dir_t;
 
 /* filesystem mode for all files or directories */
 #define ROMFS_DIR_MODE	(S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH)
 #define ROMFS_FILE_MODE	(S_IFREG | S_IRUSR | S_IRGRP | S_IROTH)
 
-static int romfs_open (struct _reent *r, void *fileStruct, const char *ipath, int flags, int mode)
+static int ramfs_open (struct _reent *r, void *fileStruct, const char *ipath, int flags, int mode)
 {
-	romfs_file_t *fobj = (romfs_file_t *)fileStruct;
+	ramfs_file_t *fobj = (ramfs_file_t *)fileStruct;
 
 	/* attempt to find the correct node for the path */
-	fobj->fsnode = node_get(ipath);
+	fobj->fsnode = ramfs_get_node(ipath);
 
 	/* the path doesn't exist */
 	if (!fobj->fsnode)
@@ -50,7 +62,7 @@ static int romfs_open (struct _reent *r, void *fileStruct, const char *ipath, in
 	}
 
 	/* the path is not a file */
-	if (fobj->fsnode->type != NODE_FILE)
+	if (fobj->fsnode->type != RAMFS_FILE)
 	{
 		r->_errno = EINVAL;
 		return -1;
@@ -63,15 +75,15 @@ static int romfs_open (struct _reent *r, void *fileStruct, const char *ipath, in
 }
 
 
-static int romfs_close(struct _reent *r, void *fd)
+static int ramfs_close(struct _reent *r, void *fd)
 {
 	/* nothing to do */
 	return 0;
 }
 
-static ssize_t romfs_read(struct _reent *r, void *fd, char *ptr, size_t len)
+static ssize_t ramfs_read(struct _reent *r, void *fd, char *ptr, size_t len)
 {
-	romfs_file_t *fobj = (romfs_file_t *)fd;	
+	ramfs_file_t *fobj = (ramfs_file_t *)fd;	
 
 	/* reached file's end */
 	if(fobj->pos >= fobj->fsnode->size)
@@ -82,7 +94,7 @@ static ssize_t romfs_read(struct _reent *r, void *fd, char *ptr, size_t len)
 		len = fobj->fsnode->size - fobj->pos;
 
 	/* copy the requested content */
-	OSBlockMove(ptr, fobj->fsnode->cont + fobj->pos, len, FALSE);
+	memcpy(ptr, fobj->fsnode->cont + fobj->pos, len);
 
 	/* advance position by bytes read */
 	fobj->pos += len;
@@ -91,9 +103,9 @@ static ssize_t romfs_read(struct _reent *r, void *fd, char *ptr, size_t len)
 	return len;
 }
 
-static off_t romfs_seek(struct _reent *r, void *fd, off_t pos, int dir)
+static off_t ramfs_seek(struct _reent *r, void *fd, off_t pos, int dir)
 {
-	romfs_file_t *fobj = (romfs_file_t *)fd;
+	ramfs_file_t *fobj = (ramfs_file_t *)fd;
 	off_t start;
 
 	/* set relative seek start */
@@ -136,9 +148,9 @@ static off_t romfs_seek(struct _reent *r, void *fd, off_t pos, int dir)
     return fobj->pos;
 }
 
-static int romfs_fstat(struct _reent *r, void *fd, struct stat *st)
+static int ramfs_fstat(struct _reent *r, void *fd, struct stat *st)
 {
-	romfs_file_t *fobj = (romfs_file_t *)fd;
+	ramfs_file_t *fobj = (ramfs_file_t *)fd;
 
 	/* clear stat structure */
 	memset(st, 0, sizeof(struct stat));
@@ -155,9 +167,9 @@ static int romfs_fstat(struct _reent *r, void *fd, struct stat *st)
 	return 0;
 }
 
-static int romfs_stat(struct _reent *r, const char *ipath, struct stat *st) {
+static int ramfs_stat(struct _reent *r, const char *ipath, struct stat *st) {
 	/* attempt to find the correct node for the path */
-	node_t *fsnode = node_get(ipath);
+	ramfs_node *fsnode = ramfs_get_node(ipath);
 
 	/* the path doesn't exist */
 	if (!fsnode)
@@ -173,7 +185,7 @@ static int romfs_stat(struct _reent *r, const char *ipath, struct stat *st) {
 	st->st_size  = fsnode->size;
 	st->st_atime = st->st_mtime = st->st_ctime = fsnode->mtime;
 	st->st_ino = fsnode->inode;
-	st->st_mode  = (fsnode->type == NODE_FILE) ? ROMFS_FILE_MODE : ROMFS_DIR_MODE;
+	st->st_mode  = (fsnode->type == RAMFS_FILE) ? ROMFS_FILE_MODE : ROMFS_DIR_MODE;
 	st->st_nlink = 1;
 	st->st_blksize = 512;
 	st->st_blocks  = (st->st_blksize + 511) / 512;
@@ -181,10 +193,10 @@ static int romfs_stat(struct _reent *r, const char *ipath, struct stat *st) {
 	return 0;
 }
 
-static int romfs_chdir(struct _reent *r, const char *ipath)
+static int ramfs_chdir(struct _reent *r, const char *ipath)
 {
 	/* attempt to find the correct node for the path */
-	node_t *fsdir = node_get(ipath);
+	ramfs_node *fsdir = ramfs_get_node(ipath);
 
 	/* the path doesn't exist */
 	if (!fsdir)
@@ -194,7 +206,7 @@ static int romfs_chdir(struct _reent *r, const char *ipath)
 	}
 
 	/* the path is not a directory */
-	if (fsdir->type != NODE_DIR)
+	if (fsdir->type != RAMFS_DIR)
 	{
 		r->_errno = EINVAL;
 		return -1;
@@ -206,12 +218,12 @@ static int romfs_chdir(struct _reent *r, const char *ipath)
 	return 0;
 }
 
-static DIR_ITER* romfs_diropen(struct _reent *r, DIR_ITER *dirState, const char *ipath)
+static DIR_ITER* ramfs_diropen(struct _reent *r, DIR_ITER *dirState, const char *ipath)
 {
-	romfs_dir_t* dirobj = (romfs_dir_t*)(dirState->dirStruct);
+	ramfs_dir_t* dirobj = (ramfs_dir_t*)(dirState->dirStruct);
 
 	/* attempt to find the correct node for the path */
-	dirobj->fsdir = node_get(ipath);
+	dirobj->fsdir = ramfs_get_node(ipath);
 
 	/* the path doesn't exist */
 	if (!dirobj->fsdir)
@@ -221,7 +233,7 @@ static DIR_ITER* romfs_diropen(struct _reent *r, DIR_ITER *dirState, const char 
 	}
 
 	/* the path is not a directory */
-	if (dirobj->fsdir->type != NODE_DIR)
+	if (dirobj->fsdir->type != RAMFS_DIR)
 	{
 		r->_errno = EINVAL;
 		return NULL;
@@ -234,9 +246,9 @@ static DIR_ITER* romfs_diropen(struct _reent *r, DIR_ITER *dirState, const char 
 	return dirState;
 }
 
-static int romfs_dirreset(struct _reent *r, DIR_ITER *dirState)
+static int ramfs_dirreset(struct _reent *r, DIR_ITER *dirState)
 {
-	romfs_dir_t* dirobj = (romfs_dir_t*)(dirState->dirStruct);
+	ramfs_dir_t* dirobj = (ramfs_dir_t*)(dirState->dirStruct);
 
 	/* reset directory iterator to the first entry */
 	dirobj->ent = dirobj->fsdir->ent;
@@ -245,9 +257,9 @@ static int romfs_dirreset(struct _reent *r, DIR_ITER *dirState)
 	return 0;
 }
 
-static int romfs_dirnext(struct _reent *r, DIR_ITER *dirState, char *filename, struct stat *filestat)
+static int ramfs_dirnext(struct _reent *r, DIR_ITER *dirState, char *filename, struct stat *filestat)
 {
-	romfs_dir_t* dirobj = (romfs_dir_t*)(dirState->dirStruct);
+	ramfs_dir_t* dirobj = (ramfs_dir_t*)(dirState->dirStruct);
 
 	/* the first entry is current directory '.' */
 	if (dirobj->idx == 0)
@@ -264,7 +276,7 @@ static int romfs_dirnext(struct _reent *r, DIR_ITER *dirState, char *filename, s
 	if (dirobj->idx == 1)
 	{
 		/* check for an upper directory */
-		node_t* updir = dirobj->fsdir->up;
+		ramfs_node* updir = dirobj->fsdir->up;
 
 		/* we reached fs top, use fs_root */
 		if (!updir)
@@ -288,7 +300,7 @@ static int romfs_dirnext(struct _reent *r, DIR_ITER *dirState, char *filename, s
 	/* write entry data */
 	memset(filestat, 0, sizeof(*filestat));
 	filestat->st_ino = dirobj->ent->inode;
-	filestat->st_mode = (dirobj->ent->type == NODE_FILE) ? ROMFS_FILE_MODE : ROMFS_DIR_MODE;
+	filestat->st_mode = (dirobj->ent->type == RAMFS_FILE) ? ROMFS_FILE_MODE : ROMFS_DIR_MODE;
 	strcpy(filename, dirobj->ent->name);
 
 	/* go to the next entry */
@@ -297,29 +309,46 @@ static int romfs_dirnext(struct _reent *r, DIR_ITER *dirState, char *filename, s
 	return 0;
 }
 
-static int romfs_dirclose(struct _reent *r, DIR_ITER *dirState)
+static int ramfs_dirclose(struct _reent *r, DIR_ITER *dirState)
 {
 	/* nothing to do */
 	return 0;
 }
 
-static devoptab_t romfs_devoptab =
+static devoptab_t ramfs_devoptab =
 {
-	.name         = "romfs",
-	.structSize   = sizeof(romfs_file_t),
-	.open_r       = romfs_open,
-	.close_r      = romfs_close,
-	.read_r       = romfs_read,
-	.seek_r       = romfs_seek,
-	.fstat_r      = romfs_fstat,
-	.stat_r       = romfs_stat,
-	.chdir_r      = romfs_chdir,
-	.dirStateSize = sizeof(romfs_dir_t),
-	.diropen_r    = romfs_diropen,
-	.dirreset_r   = romfs_dirreset,
-	.dirnext_r    = romfs_dirnext,
-	.dirclose_r   = romfs_dirclose,
+	.name         = "ramfs",
+	.structSize   = sizeof(ramfs_file_t),
+	.open_r       = ramfs_open,
+	.close_r      = ramfs_close,
+	.read_r       = ramfs_read,
+	.seek_r       = ramfs_seek,
+	.fstat_r      = ramfs_fstat,
+	.stat_r       = ramfs_stat,
+	.chdir_r      = ramfs_chdir,
+	.dirStateSize = sizeof(ramfs_dir_t),
+	.diropen_r    = ramfs_diropen,
+	.dirreset_r   = ramfs_dirreset,
+	.dirnext_r    = ramfs_dirnext,
+	.dirclose_r   = ramfs_dirclose,
 	.deviceData   = NULL,
 };
+
+int ramfs_mount()
+{
+	/* add the ramfs devoptab to devices list */
+	return AddDevice(&ramfs_devoptab);
+}
+
+void ramfs_unmount()
+{
+	/* remove the ramfs devoptab from devices list */
+	RemoveDevice("ramfs:");
+}
+
+#else
+
+int ramfs_mount() { return 0 };
+void ramfs_unmount() {}
 
 #endif

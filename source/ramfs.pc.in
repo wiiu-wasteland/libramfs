@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: ramfs
+Description: embed files inside the executable
+Version: @RAMFS_VERSION@
+Libs: -L${libdir} -lramfs
+Cflags: -I${includedir}
+ 
